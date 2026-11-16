@@ -39,11 +39,13 @@ sealed interface MainAction {
     data object TestCurrentServer : MainAction
     data object TestAllServers : MainAction
     data object TestRealAllServers : MainAction
+    data object TestSpeedAllServers : MainAction
     data object CancelTesting : MainAction
     data object RemoveAllServers : MainAction
     data object RemoveDuplicateServers : MainAction
     data object RemoveInvalidServers : MainAction
     data object SortByTestResults : MainAction
+    data object SortBySpeed : MainAction
     data object UpdateSubscriptions : MainAction
     data class UpdateGroupSubscription(val groupId: String) : MainAction
     data object ExportAll : MainAction

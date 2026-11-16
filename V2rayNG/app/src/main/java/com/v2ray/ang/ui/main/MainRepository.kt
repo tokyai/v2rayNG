@@ -72,7 +72,9 @@ class MainRepository(
                 AppConfig.MSG_MEASURE_CONFIG_FINISH -> MainServiceEvent.MeasureConfigFinish(
                     requestId
                 )
-                AppConfig.MSG_MEASURE_CONFIG_CANCEL -> MainServiceEvent.MeasureConfigCancelled(requestId)
+                AppConfig.MSG_MEASURE_CONFIG_CANCEL -> MainServiceEvent.MeasureConfigCancelled(
+                    requestId, safeIntent.getStringExtra("content").orEmpty()
+                )
 
                 else -> null
             }
@@ -179,6 +181,11 @@ class MainRepository(
 
     override fun clearAllTestDelayResults(guids: List<String>) =
         MmkvManager.clearAllTestDelayResults(guids)
+
+    override fun prepareServerTest(guids: List<String>, requestId: String, testSpeed: Boolean) =
+        MmkvManager.prepareServerTest(guids, requestId, testSpeed)
+
+    override suspend fun sortBySpeed(guids: List<String>) = AngConfigManager.sortBySpeed(guids)
 
     override fun sortByTestResultsForSub(subId: String) {
         AngConfigManager.sortByTestResultsForSub(subId)

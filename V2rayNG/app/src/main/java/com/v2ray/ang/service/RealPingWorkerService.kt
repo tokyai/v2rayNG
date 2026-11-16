@@ -1,26 +1,35 @@
 package com.v2ray.ang.service
 
 import android.content.Context
+import com.v2ray.ang.AppConfig
 import com.v2ray.ang.core.CoreConfigManager
 import com.v2ray.ang.core.CoreNativeManager
+import com.v2ray.ang.core.CoreSpeedtest
 import com.v2ray.ang.dto.RealPingEvent
+import com.v2ray.ang.dto.RealPingResult
 import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.extension.isComplexType
 import com.v2ray.ang.extension.isNotNullEmpty
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.SettingsManager
 import com.v2ray.ang.handler.SpeedtestManager
+import com.v2ray.ang.util.LogUtil
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import java.util.concurrent.Executors
+import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 internal object RealPingExecutionLimiter {
@@ -40,68 +49,88 @@ internal object RealPingExecutionLimiter {
 
 /**
  * Worker that runs a batch of real-ping tests independently.
- * Each batch owns its own CoroutineScope/dispatcher and can be cancelled separately.
+ * 每批测试有自己的取消边界；由调用服务的 Job 管理生命周期。
  */
 class RealPingWorkerService(
     private val context: Context,
     private val guids: List<String>,
     private val onlyTcp: Boolean = false,
-    private val onEvent: (RealPingEvent) -> Unit = {}
+    private val testSpeed: Boolean = false,
+    parentJob: Job? = null,
+    private val onEvent: suspend (RealPingEvent) -> Unit = {}
 ) {
-    private val job = SupervisorJob()
-    private val concurrency = SettingsManager.getRealPingConcurrency()
-    private val dispatcher = Executors.newFixedThreadPool(if (onlyTcp) concurrency * 2 else concurrency).asCoroutineDispatcher()
-    private val scope = CoroutineScope(job + dispatcher + CoroutineName("RealPingBatchWorker"))
+    private val job = SupervisorJob(parentJob)
+    private val concurrency = when {
+        testSpeed -> SpeedtestManager.DOWNLOAD_CONCURRENCY
+        onlyTcp -> SettingsManager.getRealPingConcurrency() * 2
+        else -> SettingsManager.getRealPingConcurrency()
+    }
+    private val permits = Semaphore(concurrency.coerceAtLeast(1))
+    private val scope = CoroutineScope(job + Dispatchers.IO + CoroutineName("ServerTestBatch"))
+    private val started = AtomicBoolean(false)
 
     private val runningCount = AtomicInteger(0)
-    private val totalCount = AtomicInteger(0)
+    private val totalCount = AtomicInteger(guids.size)
 
+    /** 启动一次批量测试；重复调用不会创建第二批网络请求。 */
     fun start() {
-        val jobs = guids.map { guid ->
-            totalCount.incrementAndGet()
-            scope.launch {
-                runningCount.incrementAndGet()
-                try {
-                    val result = if (onlyTcp) startTcping(guid) else startRealPing(guid)
-                    if (scope.isActive) {
-                        onEvent(RealPingEvent.Result(guid, result))
-                    }
-                } catch (_: Throwable) {
-                    // ignore
-                } finally {
-                    val count = totalCount.decrementAndGet()
-                    val left = runningCount.decrementAndGet()
-                    if (scope.isActive) {
-                        onEvent(RealPingEvent.Progress("$left / $count"))
-                    }
-                }
-            }
+        if (!started.compareAndSet(false, true)) return
+        // 信号量覆盖整个节点测试，HTTP 挂起期间也不会放大下载并发。
+        val jobs = ArrayList<Job>(guids.size)
+        for (guid in guids) {
+            jobs.add(scope.launch { runWithPermit(guid) })
         }
+        scope.launch { awaitTests(jobs) }
+    }
 
-        scope.launch {
-            try {
-                joinAll(*jobs.toTypedArray())
-                if (isActive) {
-                    onEvent(RealPingEvent.Finish("0"))
-                }
-            } catch (_: CancellationException) {
-                // If cancelled, don't send finish event to avoid confusion
-            } finally {
-                close()
-            }
+    private suspend fun runWithPermit(guid: String) {
+        permits.withPermit { runTest(guid) }
+    }
+
+    private suspend fun runTest(guid: String) {
+        runningCount.incrementAndGet()
+        try {
+            val result = measure(guid)
+            currentCoroutineContext().ensureActive()
+            onEvent(RealPingEvent.Result(guid, result.delayMillis, result.speedBytesPerSecond))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            LogUtil.e(AppConfig.TAG, "Publish test result failed: component=RealPingWorkerService guid=$guid", error)
+        } finally {
+            val remaining = totalCount.decrementAndGet()
+            val running = runningCount.decrementAndGet()
+            if (scope.isActive) onEvent(RealPingEvent.Progress("$running / $remaining"))
         }
     }
 
+    private suspend fun measure(guid: String): RealPingResult {
+        try {
+            if (testSpeed) return CoreSpeedtest.measure(context, guid)
+            val delayMillis = if (onlyTcp) startTcping(guid) else startRealPing(guid)
+            return RealPingResult(guid, delayMillis)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            LogUtil.e(AppConfig.TAG, "Measure server failed: component=RealPingWorkerService guid=$guid", error)
+            return RealPingResult(guid, -1L, if (testSpeed) -1L else null)
+        }
+    }
+
+    private suspend fun awaitTests(jobs: List<Job>) {
+        try {
+            jobs.joinAll()
+            currentCoroutineContext().ensureActive()
+            onEvent(RealPingEvent.Finish("0"))
+        } finally {
+            // 正常结束也要完成批次 Job，调用服务才能等待所有子任务释放资源。
+            job.complete()
+        }
+    }
+
+    /** 取消排队及正在执行的探测，下载请求和临时核心随后在各自 finally 中释放。 */
     fun cancel() {
         job.cancel()
-    }
-
-    private fun close() {
-        try {
-            dispatcher.close()
-        } catch (_: Throwable) {
-            // ignore
-        }
     }
 
     private suspend fun startRealPing(guid: String): Long {

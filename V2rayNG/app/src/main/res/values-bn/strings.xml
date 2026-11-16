@@ -575,4 +575,10 @@
     <string name="sub_info_open_page">সাবস্ক্রিপশন তথ্যের পাতা খুলুন</string>
     <string name="sub_info_unlimited">সীমাহীন</string>
 
+    <string name="title_speed_test_all_server">বিলম্ব ও ডাউনলোডের গতি পরীক্ষা করুন</string>
+    <string name="title_sort_by_speed">গতি অনুযায়ী সাজান (দ্রুততম প্রথমে)</string>
+    <string name="server_test_speed_value">%1$.1f MB/s</string>
+    <string name="server_test_speed_failed">গতি পরীক্ষা ব্যর্থ হয়েছে</string>
+    <string name="server_test_speed_unsupported">গতি পরীক্ষা সমর্থিত নয়</string>
+    <string name="acc_server_test_results">%1$s। %2$s %3$s</string>
 </resources>

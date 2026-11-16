@@ -17,6 +17,7 @@ import com.v2ray.ang.AppConfig.PREF_IS_BOOTED
 import com.v2ray.ang.AppConfig.PREF_ROUTING_RULESET
 import com.v2ray.ang.AppConfig.TAG
 import com.v2ray.ang.BuildConfig
+import com.v2ray.ang.dto.RealPingResult
 import com.v2ray.ang.dto.entities.AssetUrlCache
 import com.v2ray.ang.dto.entities.AssetUrlItem
 import com.v2ray.ang.dto.entities.ProfileItem
@@ -26,12 +27,26 @@ import com.v2ray.ang.dto.entities.SubscriptionCache
 import com.v2ray.ang.dto.entities.SubscriptionItem
 import com.v2ray.ang.dto.entities.WebDavConfig
 import com.v2ray.ang.util.JsonUtil
+import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 
 internal class ProfileStorageException(message: String) : IllegalStateException(message)
+
+/** 只交换参与排序的 GUID，搜索隐藏的节点及后来新增的节点保留当前位置。 */
+internal fun reorderServerSubset(current: List<String>, ordered: List<String>): List<String> {
+    val currentIds = current.toHashSet()
+    val orderedIds = ordered.filter { it in currentIds }.distinct()
+    val participating = orderedIds.toHashSet()
+    val sortedIterator = orderedIds.iterator()
+    val result = ArrayList<String>(current.size)
+    for (guid in current) {
+        result.add(if (guid in participating && sortedIterator.hasNext()) sortedIterator.next() else guid)
+    }
+    return result
+}
 
 object MmkvManager {
 
@@ -488,6 +503,101 @@ object MmkvManager {
         val aff = decodeServerAffiliationInfo(guid) ?: ServerAffiliationInfo()
         aff.testDelayMillis = testResult
         serverAffStorage.encode(guid, JsonUtil.toJson(aff))
+    }
+
+    /** 清空本轮节点结果并登记请求标识；写入失败时恢复整批旧记录。 */
+    fun prepareServerTest(guids: List<String>, requestId: String, testSpeed: Boolean) {
+        require(requestId.isNotBlank()) { "Missing server test request ID" }
+        withProfileIndexLock {
+            val previous = linkedMapOf<String, String?>()
+            try {
+                // 在原记录上补充字段，保留仅测延迟时已有的下载速度。
+                for (guid in guids.distinct()) {
+                    if (decodeServerConfig(guid) == null) continue
+                    previous[guid] = serverAffStorage.decodeString(guid)
+                    val affiliation = decodeServerAffiliationInfo(guid) ?: ServerAffiliationInfo()
+                    affiliation.testDelayMillis = 0L
+                    if (testSpeed) affiliation.testSpeedBytesPerSecond = 0L
+                    affiliation.testRequestId = requestId
+                    requireStorageWrite(
+                        serverAffStorage.encode(guid, JsonUtil.toJson(affiliation)),
+                        "Prepare server test failed: guid=$guid",
+                    )
+                }
+            } catch (error: Exception) {
+                restoreTestRecords(serverAffStorage, previous)
+                throw error
+            }
+        }
+    }
+
+    /** 仅将仍存在且属于本轮请求的节点结果写入 MMKV，延迟和速度一次保存。 */
+    fun encodeServerTestResult(result: RealPingResult, requestId: String): Boolean {
+        if (requestId.isBlank()) return false
+        return withProfileIndexLock {
+            // 节点被删除、替换或重新测速后，丢弃旧任务的迟到结果。
+            if (decodeServerConfig(result.guid) == null) return@withProfileIndexLock false
+            val affiliation = decodeServerAffiliationInfo(result.guid) ?: return@withProfileIndexLock false
+            if (affiliation.testRequestId != requestId) return@withProfileIndexLock false
+            affiliation.testDelayMillis = result.delayMillis
+            if (result.speedBytesPerSecond != null) {
+                affiliation.testSpeedBytesPerSecond = result.speedBytesPerSecond
+            }
+            requireStorageWrite(
+                serverAffStorage.encode(result.guid, JsonUtil.toJson(affiliation)),
+                "Save server test failed: guid=${result.guid}",
+            )
+            // 删除流程可能在索引解锁后移除配置；不让迟到写入留下孤立的测速记录。
+            if (decodeServerConfig(result.guid) == null) {
+                serverAffStorage.remove(result.guid)
+                return@withProfileIndexLock false
+            }
+            true
+        }
+    }
+
+    /** 将排好序的节点写回各自分组；保留未参与排序的节点，并在失败时恢复旧顺序。 */
+    fun reorderServerLists(orderedGuids: List<String>) {
+        withProfileIndexLock {
+            // 重新按 GUID 查找分组，防止测速期间的订阅替换让旧列表覆盖新节点。
+            val groups = linkedMapOf<String, MutableList<String>>()
+            for (guid in orderedGuids.distinct()) {
+                val profile = decodeServerConfig(guid) ?: continue
+                val groupId = getSubscriptionId(profile.subscriptionId)
+                var group = groups[groupId]
+                if (group == null) {
+                    group = mutableListOf()
+                    groups[groupId] = group
+                }
+                group.add(guid)
+            }
+            val previous = linkedMapOf<String, String?>()
+            try {
+                for ((groupId, ordered) in groups) {
+                    val key = serverListKey(groupId)
+                    previous[key] = mainStorage.decodeString(key)
+                    val current = decodeServerList(groupId)
+                    val updated = reorderServerSubset(current, ordered)
+                    requireStorageWrite(persistServerList(updated, groupId), "Sort by speed failed: groupId=$groupId")
+                }
+            } catch (error: Exception) {
+                restoreTestRecords(mainStorage, previous)
+                throw error
+            }
+        }
+    }
+
+    private fun restoreTestRecords(storage: MMKV, previous: Map<String, String?>) {
+        // 回滚失败的记录不能留下半写入的新值，记录错误并移除该部分写入。
+        for ((key, value) in previous) {
+            try {
+                if (value == null) storage.remove(key)
+                else requireStorageWrite(storage.encode(key, value), "Restore test record failed: id=$key")
+            } catch (error: Exception) {
+                storage.remove(key)
+                LogUtil.e(TAG, "Restore test storage failed: component=MmkvManager id=$key", error)
+            }
+        }
     }
 
     /**

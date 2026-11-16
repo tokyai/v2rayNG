@@ -575,4 +575,10 @@
     <string name="sub_info_open_page">واز کردن صفحه اطلاعات اشتراک</string>
     <string name="sub_info_unlimited">بی‌حد</string>
 
+    <string name="title_speed_test_all_server">آزمایش تئخیر وو سرعت دانلود</string>
+    <string name="title_sort_by_speed">ترتیب و ری سرعت (توندتر اول)</string>
+    <string name="server_test_speed_value">%1$.1f MB/s</string>
+    <string name="server_test_speed_failed">آزمایش سرعت سر نگرت</string>
+    <string name="server_test_speed_unsupported">آزمایش سرعت پشتیبانی نؽبۊ</string>
+    <string name="acc_server_test_results">%1$s. %2$s %3$s</string>
 </resources>

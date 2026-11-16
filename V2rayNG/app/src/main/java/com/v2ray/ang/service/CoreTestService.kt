@@ -20,6 +20,17 @@ import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.helper.MessageHelper
 import com.v2ray.ang.helper.NotificationHelper
 import com.v2ray.ang.util.LogUtil
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 
 class CoreTestService : Service() {
@@ -28,8 +39,13 @@ class CoreTestService : Service() {
         super.attachBaseContext(newBase?.let(AppLocaleManager::localizedContext))
     }
 
-    // manage active batch workers so each batch is independent and cancellable
-    private val activeWorkers = ConcurrentHashMap<RealPingWorkerService, String>()
+    // 服务持有批次的父 Job；取消时先阻止结果发布，等待子任务清理后再结束请求。
+    private val serviceJob = SupervisorJob()
+    private val serviceScope = CoroutineScope(serviceJob + Dispatchers.Main.immediate + CoroutineName("CoreTests"))
+    private val activeRequests = ConcurrentHashMap<String, Job>()
+    private var latestStartId = 0
+    private var destroyed = false
+    private var stopping = false
     private val cancelAction by lazy {
         val intent = Intent(this, CoreTestService::class.java).putExtra(
             "content",
@@ -49,14 +65,6 @@ class CoreTestService : Service() {
     }
 
     /**
-     * Initializes the V2Ray environment.
-     */
-    override fun onCreate() {
-        super.onCreate()
-        CoreNativeManager.initCoreEnv(this)
-    }
-
-    /**
      * Binds the service.
      * @param intent The intent.
      * @return The binder.
@@ -69,8 +77,10 @@ class CoreTestService : Service() {
      * Cleans up resources when the service is destroyed.
      */
     override fun onDestroy() {
-        LogUtil.i(AppConfig.TAG, "CoreTestService is being destroyed, cancelling ${activeWorkers.size} active workers")
+        destroyed = true
+        stopping = true
         cancelWorkers()
+        serviceJob.cancel()
         NotificationHelper.stopForeground(this)
         super.onDestroy()
     }
@@ -90,6 +100,7 @@ class CoreTestService : Service() {
             getString(R.string.title_real_ping_all_server),
             cancelAction
         )
+        latestStartId = startId
         val message = intent?.serializable<TestServiceMessage>("content")
         if (message == null) {
             stopSelf(startId)
@@ -109,36 +120,87 @@ class CoreTestService : Service() {
     }
 
     private fun handleMeasureStart(message: TestServiceMessage, startId: Int, requestId: String) {
-        LogUtil.i(AppConfig.TAG, "CoreTestService starting worker   subscription ${message.subscriptionId}")
-
-        val guidsList = when {
-            message.serverGuids.isNotEmpty() -> message.serverGuids
-            message.subscriptionId.isNotEmpty() -> MmkvManager.decodeServerList(message.subscriptionId)
-            else -> MmkvManager.decodeAllServerList()
-        }
-
-        if (guidsList.isNotEmpty()) {
-            lateinit var worker: RealPingWorkerService
-            worker = RealPingWorkerService(
-                context = this,
-                guids = guidsList,
-                onlyTcp = message.onlyTcp,
-                onEvent = { event ->
-                    if (activeWorkers.containsKey(worker)) {
-                        handleWorkerEvent(event, message, requestId) { activeWorkers.remove(worker) }
-                    }
-                }
-            )
-            activeWorkers[worker] = requestId
-            worker.start()
-        } else {
-            MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_CANCEL, "", requestId)
-            NotificationHelper.stopForeground(this)
+        if (stopping || requestId.isBlank()) {
             stopSelf(startId)
+            return
+        }
+        if (activeRequests.containsKey(requestId)) return
+        val title = if (message.testSpeed) R.string.title_speed_test_all_server else R.string.title_real_ping_all_server
+        NotificationHelper.updateNotification(NotificationChannelType.CORE_TEST, this, getString(R.string.app_name), getString(title))
+        // LAZY 先登记再执行，极快的失败也能找到并取消所属请求。
+        val requestJob = serviceScope.launch(start = CoroutineStart.LAZY) {
+            runMeasure(message, requestId)
+        }
+        activeRequests[requestId] = requestJob
+        requestJob.start()
+    }
+
+    private suspend fun runMeasure(message: TestServiceMessage, requestId: String) {
+        try {
+            val guids = message.serverGuids.distinct()
+            if (guids.isEmpty()) {
+                MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_CANCEL, "", requestId)
+                return
+            }
+            // 进入前台后才在 IO 线程初始化原生环境、读取配置并启动测试。
+            withContext(Dispatchers.IO) {
+                CoreNativeManager.initCoreEnv(this@CoreTestService)
+                startWorker(message, requestId, guids, currentCoroutineContext()[Job])
+            }
+            currentCoroutineContext().ensureActive()
+            finishBatch(message, guids)
+            MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_FINISH, "0", requestId)
+        } catch (cancelled: CancellationException) {
+            if (!destroyed) MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_CANCEL, "", requestId)
+            throw cancelled
+        } catch (error: Exception) {
+            LogUtil.e(AppConfig.TAG, "Run test batch failed: component=CoreTestService groupId=${message.subscriptionId}", error)
+            MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_CANCEL, getString(R.string.toast_failure), requestId)
+        } finally {
+            activeRequests.remove(requestId)
+            // Android 可能已接收下一次启动、但尚未回调 onStartCommand；按启动编号停止，避免误停新请求。
+            if (!destroyed && activeRequests.isEmpty()) {
+                val stopped = stopSelfResult(latestStartId)
+                if (stopped) NotificationHelper.stopForeground(this)
+            }
         }
     }
 
-    private fun handleWorkerEvent(event: RealPingEvent, message: TestServiceMessage, requestId: String, onWorkerDone: () -> Unit) {
+    private fun startWorker(message: TestServiceMessage, requestId: String, guids: List<String>, parentJob: Job?) {
+        val worker = RealPingWorkerService(
+            context = this,
+            guids = guids,
+            onlyTcp = message.onlyTcp,
+            testSpeed = message.testSpeed,
+            parentJob = parentJob,
+            onEvent = { event -> publishWorkerEvent(event, requestId) },
+        )
+        worker.start()
+    }
+
+    private suspend fun publishWorkerEvent(event: RealPingEvent, requestId: String) {
+        if (activeRequests[requestId]?.isActive != true) return
+        try {
+            // MMKV 写入仍在后台；发送结果回到主线程，与取消命令按顺序执行。
+            if (event is RealPingEvent.Result) {
+                val result = RealPingResult(event.guid, event.delayMillis, event.speedBytesPerSecond)
+                if (!MmkvManager.encodeServerTestResult(result, requestId)) return
+            }
+            withContext(Dispatchers.Main.immediate) {
+                if (activeRequests[requestId]?.isActive == true) handleWorkerEvent(event, requestId)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            LogUtil.e(AppConfig.TAG, "Publish batch event failed: component=CoreTestService requestId=$requestId", error)
+            withContext(Dispatchers.Main.immediate) {
+                MessageHelper.sendMsg2UI(this@CoreTestService, AppConfig.MSG_MEASURE_CONFIG_CANCEL, getString(R.string.toast_failure), requestId)
+                activeRequests[requestId]?.cancel()
+            }
+        }
+    }
+
+    private fun handleWorkerEvent(event: RealPingEvent, requestId: String) {
         when (event) {
             is RealPingEvent.Progress -> {
                 NotificationHelper.updateNotification(
@@ -151,38 +213,39 @@ class CoreTestService : Service() {
             }
 
             is RealPingEvent.Result -> {
-                MmkvManager.encodeServerTestDelayMillis(event.guid, event.delayMillis)
+                val result = RealPingResult(event.guid, event.delayMillis, event.speedBytesPerSecond)
                 MessageHelper.sendMsg2UI(
                     this,
                     AppConfig.MSG_MEASURE_CONFIG_SUCCESS,
-                    RealPingResult(event.guid, event.delayMillis),
+                    result,
                     requestId,
                 )
             }
 
-            is RealPingEvent.Finish -> {
-                if (message.subscriptionId.isNotEmpty()) {
-                    if (MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_REMOVE_INVALID_AFTER_TEST, false)) {
-                        AngConfigManager.removeInvalidServer(message.subscriptionId)
-                    }
+            // 父协程等到所有核心释放后，才执行自动排序并发送完成事件。
+            is RealPingEvent.Finish -> Unit
+        }
+    }
 
-                    if (MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SORT_AFTER_TEST, false)) {
-                        AngConfigManager.sortByTestResultsForSub(message.subscriptionId)
-                    }
-                }
-
-                MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_FINISH, event.status, requestId)
-                onWorkerDone()
-                if (activeWorkers.isEmpty()) {
-                    NotificationHelper.stopForeground(this)
-                    stopSelf()
-                }
+    private suspend fun finishBatch(message: TestServiceMessage, guids: List<String>) {
+        if (message.subscriptionId.isEmpty()) return
+        val sortAfterTest = withContext(Dispatchers.IO) {
+            if (MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_REMOVE_INVALID_AFTER_TEST, false)) {
+                // 搜索结果之外的节点没有参加本轮测试，不能因旧结果被顺带删除。
+                for (guid in guids) MmkvManager.removeInvalidServer(guid)
             }
+            MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SORT_AFTER_TEST, false)
+        }
+        if (!sortAfterTest) return
+        if (message.testSpeed) {
+            AngConfigManager.sortBySpeed(guids)
+        } else {
+            withContext(Dispatchers.IO) { AngConfigManager.sortByTestResultsForSub(message.subscriptionId) }
         }
     }
 
     private fun handleMeasureCancel() {
-        LogUtil.i(AppConfig.TAG, "CoreTestService received cancel message, cancelling ${activeWorkers.size} active workers")
+        stopping = true
         cancelWorkers()
         NotificationHelper.stopForeground(this)
         stopSelf()
@@ -190,11 +253,10 @@ class CoreTestService : Service() {
 
     private fun cancelWorkers() {
         // Reply for each cancelled request, never for a newer UI request that has not started here.
-        activeWorkers.entries.toList().forEach { (worker, requestId) ->
-            if (activeWorkers.remove(worker, requestId)) {
-                worker.cancel()
-                MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_CANCEL, "", requestId)
-            }
+        for ((requestId, job) in activeRequests) {
+            job.cancel()
+            MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_CANCEL, "", requestId)
         }
+        activeRequests.clear()
     }
 }

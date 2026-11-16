@@ -43,28 +43,35 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.PatternSyntaxException
 
-private fun applyTestDelayResults(
+/** 按节点 GUID 合并结果，延迟测试不会清掉之前测得的下载速度。 */
+internal fun applyTestResults(
     servers: List<ServersCache>,
-    updates: Map<String, Long>,
-): List<ServersCache> = servers.map { server ->
-    val delayMillis = updates[server.guid]
-    if (delayMillis == null || delayMillis == server.testDelayMillis) {
-        server
-    } else {
-        server.copy(testDelayMillis = delayMillis)
+    updates: Map<String, RealPingResult>,
+): List<ServersCache> {
+    val result = ArrayList<ServersCache>(servers.size)
+    for (server in servers) {
+        val update = updates[server.guid]
+        result.add(if (update == null) server else server.copy(
+            testDelayMillis = update.delayMillis,
+            testSpeedBytesPerSecond = update.speedBytesPerSecond ?: server.testSpeedBytesPerSecond,
+        ))
     }
+    return result
 }
 
-private fun applyTestDelayResultsToRows(
+internal fun applyTestResultsToRows(
     rows: List<ServerRowUiModel>,
-    updates: Map<String, Long>,
-): List<ServerRowUiModel> = rows.map { row ->
-    val delayMillis = updates[row.guid]
-    if (delayMillis == null || delayMillis == row.testDelayMillis) {
-        row
-    } else {
-        row.copy(testDelayMillis = delayMillis)
+    updates: Map<String, RealPingResult>,
+): List<ServerRowUiModel> {
+    val result = ArrayList<ServerRowUiModel>(rows.size)
+    for (row in rows) {
+        val update = updates[row.guid]
+        result.add(if (update == null) row else row.copy(
+            testDelayMillis = update.delayMillis,
+            testSpeedBytesPerSecond = update.speedBytesPerSecond ?: row.testSpeedBytesPerSecond,
+        ))
     }
+    return result
 }
 
 class MainViewModel(
@@ -105,10 +112,11 @@ class MainViewModel(
     private var selectedGroupLoadJob: Job? = null
     private var reloadJob: Job? = null
     private var testResultFlushJob: Job? = null
-    private val pendingTestResults = linkedMapOf<String, Long>()
+    private val pendingTestResults = linkedMapOf<String, RealPingResult>()
 
     private val testRequests = MainTestRequests()
     private var bulkTestJob: Job? = null
+    private val testPreparationMutex = Mutex()
 
     private val initialPageReady = CompletableDeferred<Unit>()
 
@@ -180,13 +188,15 @@ class MainViewModel(
                 if (testRequests.completeBulk(event.requestId) != null) {
                     cancelPendingTestResults()
                     resetTestStatus()
+                    if (event.errorMessage.isNotBlank()) toastError(event.errorMessage)
+                    reloadAllGroups(uiState.value.groups.map { it.id })
                 }
             }
         }
     }
 
     private fun queueTestResult(result: RealPingResult, request: MainTestRequests.Bulk) {
-        pendingTestResults[result.guid] = result.delayMillis
+        pendingTestResults[result.guid] = result
         if (testResultFlushJob?.isActive == true) return
 
         testResultFlushJob = viewModelScope.launch {
@@ -201,21 +211,41 @@ class MainViewModel(
         if (pendingTestResults.isEmpty()) return
         if (testRequests.bulk?.id != request.id) return
 
-        val updates = cacheMutex.withLock {
-            val drained = pendingTestResults.toMap()
-            pendingTestResults.clear()
-            groupDataCache[request.groupId]?.let { cached ->
-                groupDataCache[request.groupId] = applyTestDelayResults(cached, drained)
+        // 待发布队列只在主线程读写；批量列表转换交给后台，避免测速结果阻塞滑动。
+        val updates = pendingTestResults.toMap()
+        pendingTestResults.clear()
+        applyResultsToLoadedGroups(updates, request)
+    }
+
+    private suspend fun applyResultsToLoadedGroups(
+        updates: Map<String, RealPingResult>,
+        request: MainTestRequests.Bulk,
+    ) {
+        cacheMutex.lock()
+        try {
+            withContext(defaultDispatcher) {
+                for ((groupId, cached) in groupDataCache) {
+                    groupDataCache[groupId] = applyTestResults(cached, updates)
+                }
             }
-            drained
+        } finally {
+            cacheMutex.unlock()
         }
-        if (updates.isEmpty()) return
-        if (testRequests.bulk?.id != request.id) return
-        mutableServerGroupState(request.groupId).update { current ->
-            current.copy(
-                servers = applyTestDelayResults(current.servers, updates),
-                rows = applyTestDelayResultsToRows(current.rows, updates),
-            )
+
+        // 同一 GUID 可能同时出现在“全部”和具体分组，切换标签也能看到新结果。
+        for (groupState in groupUiFlows.values) {
+            while (testRequests.bulk?.id == request.id) {
+                val current = groupState.value
+                val updated = withContext(defaultDispatcher) {
+                    current.copy(
+                        servers = applyTestResults(current.servers, updates),
+                        rows = applyTestResultsToRows(current.rows, updates),
+                    )
+                }
+                if (testRequests.bulk?.id != request.id) return
+                // 发布期间若发生搜索、排序或重新加载，就基于新列表重算，不能覆盖新顺序。
+                if (groupState.compareAndSet(current, updated)) break
+            }
         }
     }
 
@@ -279,11 +309,13 @@ class MainViewModel(
             MainAction.RefreshGroups -> setupGroupTab(forceRefresh = true)
             MainAction.TestAllServers -> testAllRealPing(true)
             MainAction.TestRealAllServers -> testAllRealPing()
+            MainAction.TestSpeedAllServers -> testAllRealPing(testSpeed = true)
             MainAction.CancelTesting -> cancelAllPing()
             MainAction.RemoveAllServers -> removeAllServerAsync()
             MainAction.RemoveDuplicateServers -> removeDuplicateServerAsync()
             MainAction.RemoveInvalidServers -> removeInvalidServerAsync()
             MainAction.SortByTestResults -> sortByTestResultsAsync()
+            MainAction.SortBySpeed -> sortBySpeedAsync()
             MainAction.UpdateSubscriptions -> importConfigViaSub(uiState.value.selectedGroupId)
             is MainAction.UpdateGroupSubscription -> importConfigViaSub(action.groupId)
             MainAction.ExportAll -> exportAllAsync()
@@ -353,7 +385,8 @@ class MainViewModel(
             ServersCache(
                 guid = guid,
                 profile = profile.copy(),
-                testDelayMillis = affiliation?.testDelayMillis ?: 0L
+                testDelayMillis = affiliation?.testDelayMillis ?: 0L,
+                testSpeedBytesPerSecond = affiliation?.testSpeedBytesPerSecond ?: 0L,
             )
         }
 
@@ -718,6 +751,26 @@ class MainViewModel(
         subs.forEach { dataSource.sortByTestResultsForSub(it) }
     }
 
+    private fun sortBySpeedAsync() {
+        // 在启动时固定参与节点，切换分组或修改搜索不会把排序应用到其他节点。
+        val guids = currentServers().map { it.guid }
+        if (guids.isEmpty()) return
+        launchLoading { sortBySpeedAndReload(guids) }
+    }
+
+    private suspend fun sortBySpeedAndReload(guids: List<String>) {
+        try {
+            dataSource.sortBySpeed(guids)
+            cacheMutex.withLock { groupDataCache.clear() }
+            setupGroupTab(forceRefresh = true)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            LogUtil.e(AppConfig.TAG, "Sort by speed failed: component=MainViewModel", error)
+            toastError(R.string.toast_failure)
+        }
+    }
+
     fun subscriptionIdChanged(id: String) {
         if (_uiState.value.groups.none { it.id == id }) return
         mutableServerGroupState(id)
@@ -835,53 +888,55 @@ class MainViewModel(
         }
     }
 
-    fun testAllRealPing(onlyTcp: Boolean = false) {
+    /** 对当前分组及搜索结果启动批量测试，重复操作会先取消上一批。 */
+    fun testAllRealPing(onlyTcp: Boolean = false, testSpeed: Boolean = false) {
         cancelAllPing()
         val groupId = uiState.value.selectedGroupId
         val servers = currentServers()
-        if (servers.isEmpty()) {
-            return
-        }
+        if (servers.isEmpty()) return
+        // 请求携带确定的 GUID 快照，后台不再用变化后的分组列表扩大测试范围。
         val serverGuids = servers.map { it.guid }
-        mutableServerGroupState(groupId).update { current ->
-            current.copy(
-                servers = current.servers.map { server ->
-                    if (server.testDelayMillis == 0L) server
-                    else server.copy(testDelayMillis = 0L)
-                },
-                rows = current.rows.map { row ->
-                    if (row.testDelayMillis == 0L) row
-                    else row.copy(testDelayMillis = 0L)
-                }
-            )
+        val resetResults = serverGuids.associateWith { guid ->
+            RealPingResult(guid, 0L, if (testSpeed) 0L else null)
         }
         val request = testRequests.beginBulk(groupId)
         val message = TestServiceMessage(
             key = AppConfig.MSG_MEASURE_CONFIG_START,
             subscriptionId = groupId,
-            serverGuids = if (keywordFilter.isNotEmpty()) serverGuids else emptyList(),
-            onlyTcp = onlyTcp
+            serverGuids = serverGuids,
+            onlyTcp = onlyTcp,
+            testSpeed = testSpeed,
         )
-        _uiState.update {
-            it.copy(
-                isTesting = true,
-                status = MainStatus.Testing
-            )
-        }
-        bulkTestJob = viewModelScope.launch {
+        _uiState.update { it.copy(isTesting = true, status = MainStatus.Testing) }
+        bulkTestJob = viewModelScope.launch { prepareAndStartTest(message, request, resetResults) }
+    }
+
+    private suspend fun prepareAndStartTest(
+        message: TestServiceMessage,
+        request: MainTestRequests.Bulk,
+        resetResults: Map<String, RealPingResult>,
+    ) {
+        // 串行化清空记录；取消中的旧任务必须结束写入，新任务才可登记自己的请求 ID。
+        testPreparationMutex.lock()
+        try {
             withContext(ioDispatcher) {
-                dataSource.clearAllTestDelayResults(serverGuids)
-                val resetGuids = serverGuids.toHashSet()
-                cacheMutex.withLock {
-                    groupDataCache[groupId]?.let { cached ->
-                        groupDataCache[groupId] = cached.map { server ->
-                            if (server.guid !in resetGuids || server.testDelayMillis == 0L) server
-                            else server.copy(testDelayMillis = 0L)
-                        }
-                    }
-                }
+                dataSource.prepareServerTest(message.serverGuids, request.id, message.testSpeed)
             }
+            if (testRequests.bulk?.id != request.id) return
+            applyResultsToLoadedGroups(resetResults, request)
+            if (testRequests.bulk?.id != request.id) return
             dataSource.sendMsg2TestService(message, request.id)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            LogUtil.e(AppConfig.TAG, "Prepare server test failed: component=MainViewModel groupId=${request.groupId}", error)
+            if (testRequests.completeBulk(request.id) != null) {
+                resetTestStatus()
+                toastError(R.string.toast_failure)
+                reloadAllGroups(uiState.value.groups.map { it.id })
+            }
+        } finally {
+            testPreparationMutex.unlock()
         }
     }
 

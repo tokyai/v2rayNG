@@ -573,4 +573,10 @@
     <string name="sub_info_open_page">Mở trang thông tin đăng ký</string>
     <string name="sub_info_unlimited">Không giới hạn</string>
 
+    <string name="title_speed_test_all_server">Kiểm tra độ trễ và tốc độ tải xuống</string>
+    <string name="title_sort_by_speed">Sắp xếp theo tốc độ (nhanh nhất trước)</string>
+    <string name="server_test_speed_value">%1$.1f MB/s</string>
+    <string name="server_test_speed_failed">Kiểm tra tốc độ thất bại</string>
+    <string name="server_test_speed_unsupported">Không hỗ trợ kiểm tra tốc độ</string>
+    <string name="acc_server_test_results">%1$s. %2$s %3$s</string>
 </resources>

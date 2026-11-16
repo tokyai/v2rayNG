@@ -576,4 +576,10 @@
     <string name="sub_info_traffic" translatable="false">%1$s / %2$s</string>
     <string name="sub_info_unlimited">Limitsiz</string>
 
+    <string name="title_speed_test_all_server">Gecikməni və yükləmə sürətini yoxla</string>
+    <string name="title_sort_by_speed">Sürətə görə sırala (əvvəl ən sürətli)</string>
+    <string name="server_test_speed_value">%1$.1f MB/s</string>
+    <string name="server_test_speed_failed">Sürət testi uğursuz oldu</string>
+    <string name="server_test_speed_unsupported">Sürət testi dəstəklənmir</string>
+    <string name="acc_server_test_results">%1$s. %2$s %3$s</string>
 </resources>

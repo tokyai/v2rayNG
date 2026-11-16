@@ -573,4 +573,10 @@
     <string name="sub_info_open_page">開啟訂閱資訊頁面</string>
     <string name="sub_info_unlimited">無限制</string>
 
+    <string name="title_speed_test_all_server">一鍵測試延遲和速度</string>
+    <string name="title_sort_by_speed">依速度排序（由快到慢）</string>
+    <string name="server_test_speed_value">%1$.1f MB/s</string>
+    <string name="server_test_speed_failed">測速失敗</string>
+    <string name="server_test_speed_unsupported">不支援測速</string>
+    <string name="acc_server_test_results">%1$s，%2$s，%3$s</string>
 </resources>

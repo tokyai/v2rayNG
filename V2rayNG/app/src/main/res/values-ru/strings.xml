@@ -579,4 +579,10 @@
     <string name="sub_info_open_page">Открыть страницу подписки</string>
     <string name="sub_info_unlimited">Без ограничений</string>
 
+    <string name="title_speed_test_all_server">Проверить задержку и скорость загрузки</string>
+    <string name="title_sort_by_speed">Сортировать по скорости (сначала быстрые)</string>
+    <string name="server_test_speed_value">%1$.1f МБ/с</string>
+    <string name="server_test_speed_failed">Ошибка проверки скорости</string>
+    <string name="server_test_speed_unsupported">Проверка скорости не поддерживается</string>
+    <string name="acc_server_test_results">%1$s. %2$s %3$s</string>
 </resources>

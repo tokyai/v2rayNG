@@ -29,6 +29,8 @@ import com.v2ray.ang.util.JsonUtil
 import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.QRCodeDecoder
 import com.v2ray.ang.util.Utils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.Headers
 import java.net.URI
 
@@ -613,6 +615,24 @@ object AngConfigManager {
             .map { it.first }
             .toMutableList()
         MmkvManager.encodeServerList(sorted, subId)
+    }
+
+    /** 按下载速度排序指定节点；仅更新这些节点在各自订阅分组中的顺序。 */
+    suspend fun sortBySpeed(guids: List<String>) {
+        // MMKV 读取与排序分别在 IO、Default 调度器执行，界面和服务共用此入口。
+        val speeds = withContext(Dispatchers.IO) {
+            val result = HashMap<String, Long>(guids.size)
+            for (guid in guids) {
+                result[guid] = MmkvManager.decodeServerAffiliationInfo(guid)?.testSpeedBytesPerSecond ?: 0L
+            }
+            result
+        }
+        val ordered = withContext(Dispatchers.Default) {
+            SpeedtestManager.sortBySpeed(guids, speeds)
+        }
+        withContext(Dispatchers.IO) {
+            MmkvManager.reorderServerLists(ordered)
+        }
     }
 
     /**

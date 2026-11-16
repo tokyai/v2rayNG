@@ -84,6 +84,54 @@ object CoreConfigManager {
         }
     }
 
+    /** 构造下载测速配置；自定义配置与 Windows 端一致，不启动完整自定义服务。 */
+    fun getV2rayConfig4DownloadTest(context: Context, guid: String, httpPort: Int): ConfigResult {
+        try {
+            // 复用协议、代理链和策略组的配置生成流程，不修改正在使用的配置。
+            val configContext = CoreConfigContextBuilder.build(context, guid)
+                ?: return ConfigResult(false, guid)
+            if (configContext.isCustom) return ConfigResult(false, guid)
+            val config = buildUnifiedConfig(configContext)
+            configureDownloadTest(config, httpPort)
+            return toConfigResult(configContext, config)
+        } catch (error: Exception) {
+            LogUtil.e(AppConfig.TAG, "Build download test config failed: component=CoreTestService guid=$guid", error)
+            return ConfigResult(false, guid)
+        }
+    }
+
+    internal fun configureDownloadTest(config: V2rayConfig, httpPort: Int) {
+        require(httpPort in 1..65535) { "Invalid download test port" }
+        // 仅保留临时本地 HTTP 入口，避免占用当前 VPN、SOCKS 或 DNS 监听端口。
+        config.inbounds.clear()
+        config.inbounds.add(
+            V2rayConfig.InboundBean(
+                tag = "download-test",
+                port = httpPort,
+                protocol = "http",
+                listen = AppConfig.LOOPBACK,
+            )
+        )
+        config.log.loglevel = "none"
+        config.dns = null
+        config.fakedns = null
+        config.stats = null
+        config.policy = null
+        for (outbound in config.outbounds) outbound.mux = null
+
+        // 所有探测流量必须经过待测节点；保留策略组的均衡器和代理链的逐跳连接。
+        config.routing.domainStrategy = "AsIs"
+        config.routing.rules.clear()
+        val hasPrimaryBalancer = config.routing.balancers?.any { it.tag == AppConfig.TAG_BALANCER } == true
+        val testRule = if (hasPrimaryBalancer) {
+            V2rayConfig.RoutingBean.RulesBean(network = "tcp,udp", balancerTag = AppConfig.TAG_BALANCER)
+        } else {
+            require(config.outbounds.any { it.tag == AppConfig.TAG_PROXY }) { "Missing test proxy outbound" }
+            V2rayConfig.RoutingBean.RulesBean(network = "tcp,udp", outboundTag = AppConfig.TAG_PROXY)
+        }
+        config.routing.rules.add(testRule)
+    }
+
     /**
      * Build configuration for custom profiles.
      */

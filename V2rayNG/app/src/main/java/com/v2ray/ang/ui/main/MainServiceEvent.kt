@@ -14,5 +14,5 @@ sealed class MainServiceEvent {
     data class MeasureConfigSuccess(val result: RealPingResult, val requestId: String) : MainServiceEvent()
     data class MeasureConfigNotify(val progress: String, val requestId: String) : MainServiceEvent()
     data class MeasureConfigFinish(val requestId: String) : MainServiceEvent()
-    data class MeasureConfigCancelled(val requestId: String) : MainServiceEvent()
+    data class MeasureConfigCancelled(val requestId: String, val errorMessage: String = "") : MainServiceEvent()
 }

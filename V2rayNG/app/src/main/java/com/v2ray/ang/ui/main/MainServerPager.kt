@@ -1,7 +1,6 @@
 package com.v2ray.ang.ui.main
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +26,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +45,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -55,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.v2ray.ang.R
 import com.v2ray.ang.dto.LocateTarget
+import com.v2ray.ang.dto.RealPingResult
 import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.dto.entities.SubscriptionUsageInfo
 import com.v2ray.ang.ui.compose.ItemDivider
@@ -353,6 +357,14 @@ private fun ServerListItem(
     } else {
         stringResource(R.string.server_test_delay_value, row.testDelayMillis)
     }
+    // 速度单独成行，长节点名称及双栏布局仍能同时显示延迟和速度。
+    val speedResult = when {
+        row.testSpeedBytesPerSecond == RealPingResult.SPEED_UNSUPPORTED -> stringResource(R.string.server_test_speed_unsupported)
+        row.testSpeedBytesPerSecond < 0L -> stringResource(R.string.server_test_speed_failed)
+        row.testSpeedBytesPerSecond == 0L -> ""
+        else -> stringResource(R.string.server_test_speed_value, row.testSpeedBytesPerSecond / 1_000_000.0)
+    }
+    val accessibleName = stringResource(R.string.acc_server_test_results, row.remarks, testResult, speedResult)
     val selectedStateDescription = if (isSelected) {
         stringResource(R.string.acc_selected_server)
     } else {
@@ -362,12 +374,13 @@ private fun ServerListItem(
         modifier = Modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
-            .semantics {
+            .semantics(mergeDescendants = true) {
+                contentDescription = accessibleName
                 if (selectedStateDescription != null) {
                     stateDescription = selectedStateDescription
                 }
             }
-            .clickable { actions.select(row.guid) }
+            .selectable(selected = isSelected, role = Role.RadioButton) { actions.select(row.guid) }
     ) {
         Box(
             Modifier
@@ -394,7 +407,7 @@ private fun ServerListItem(
                 .padding(start = 8.dp, end = 12.dp, top = 8.dp, bottom = 8.dp)
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(row.remarks, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Paragraph), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(row.remarks, Modifier.weight(1f).clearAndSetSemantics {}, style = MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Paragraph), maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (doubleColumnDisplay) {
                     IconButton(onClick = { actions.more(row.guid, row.profile) }, Modifier.size(36.dp)) {
                         Icon(
@@ -428,7 +441,7 @@ private fun ServerListItem(
                 }
             }
             Spacer(modifier = Modifier.height(6.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().clearAndSetSemantics {}, verticalAlignment = Alignment.CenterVertically) {
                 if (row.subscriptionBadge.isNotBlank()) {
                     Box(
                         Modifier
@@ -449,7 +462,7 @@ private fun ServerListItem(
                 )
             }
             Spacer(modifier = Modifier.height(6.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(Modifier.fillMaxWidth().clearAndSetSemantics {}, horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
                     row.typeDescription,
                     modifier = Modifier.weight(1f, fill = false),
@@ -459,13 +472,24 @@ private fun ServerListItem(
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    testResult,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (row.testDelayMillis < 0L) colorPingRed else colorPing,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        testResult,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (row.testDelayMillis < 0L) colorPingRed else colorPing,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (speedResult.isNotEmpty()) {
+                        Text(
+                            speedResult,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (row.testSpeedBytesPerSecond < 0L) colorPingRed else colorPing,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
         }
     }
