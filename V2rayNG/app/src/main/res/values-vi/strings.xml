@@ -574,6 +574,7 @@
     <string name="sub_info_unlimited">Không giới hạn</string>
 
     <string name="title_speed_test_all_server">Kiểm tra độ trễ và tốc độ tải xuống</string>
+    <string name="title_clear_invalid_servers">Xóa nhanh các nút không hoạt động</string>
     <string name="title_sort_by_speed">Sắp xếp theo tốc độ (nhanh nhất trước)</string>
     <string name="server_test_speed_value">%1$.1f MB/s</string>
     <string name="server_test_speed_failed">Kiểm tra tốc độ thất bại</string>

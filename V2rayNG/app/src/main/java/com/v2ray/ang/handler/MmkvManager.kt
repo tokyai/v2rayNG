@@ -660,6 +660,57 @@ object MmkvManager {
     }
 
     /**
+     * 批量清除一个订阅组内延迟测试失败的节点；删除失败时恢复原记录和组内顺序。
+     * @param subscriptionId 要清理的订阅组 ID，空 ID 不允许扩大为全部分组。
+     * @return 实际删除的节点数；未测、不支持测速和仅下载失败的节点不计入。
+     */
+    fun clearInvalidServers(subscriptionId: String): Int {
+        require(subscriptionId.isNotBlank()) { "Missing cleanup subscription ID" }
+        return withProfileIndexLock {
+            // 与测速结果写入、订阅替换共用索引锁，只检查当前仍属于此组的节点。
+            val groupId = getSubscriptionId(subscriptionId)
+            val current = decodeServerList(groupId)
+            val invalidGuids = linkedSetOf<String>()
+            for (guid in current) {
+                val affiliation = decodeServerAffiliationInfo(guid) ?: continue
+                if (affiliation.testDelayMillis >= 0L ||
+                    affiliation.testSpeedBytesPerSecond == RealPingResult.SPEED_UNSUPPORTED
+                ) continue
+                val profile = decodeServerConfig(guid) ?: continue
+                if (getSubscriptionId(profile.subscriptionId) == groupId) invalidGuids.add(guid)
+            }
+            if (invalidGuids.isEmpty()) return@withProfileIndexLock 0
+
+            // 保存待删除数据，以便任一存储操作失败时恢复整批；不记录永久过滤名单。
+            val previous = linkedMapOf<MMKV, Map<String, String?>>()
+            for (storage in listOf(profileFullStorage, serverAffStorage, serverRawStorage)) {
+                val records = linkedMapOf<String, String?>()
+                for (guid in invalidGuids) records[guid] = storage.decodeString(guid)
+                previous[storage] = records
+            }
+            val indexKey = serverListKey(groupId)
+            val mainRecords = linkedMapOf(indexKey to mainStorage.decodeString(indexKey))
+            val selected = getSelectServer()
+            if (selected in invalidGuids) mainRecords[KEY_SELECTED_SERVER] = selected
+            previous[mainStorage] = mainRecords
+
+            try {
+                // 一次更新分组索引和批量删除内容，避免每删一个节点都重写整张节点列表。
+                val remaining = current.toMutableList()
+                remaining.removeAll(invalidGuids)
+                requireStorageWrite(persistServerList(remaining, groupId), "Clear invalid servers failed: groupId=$groupId")
+                if (selected in invalidGuids) mainStorage.remove(KEY_SELECTED_SERVER)
+                removeProfilePayloads(invalidGuids)
+            } catch (error: Exception) {
+                // 先恢复节点内容，最后恢复索引和选中项，外层统一报告本次清理失败。
+                for ((storage, records) in previous) restoreTestRecords(storage, records)
+                throw error
+            }
+            invalidGuids.size
+        }
+    }
+
+    /**
      * Encodes the raw server configuration.
      *
      * @param guid The server GUID.

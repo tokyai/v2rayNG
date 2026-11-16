@@ -182,6 +182,8 @@ class MainRepository(
     override fun clearAllTestDelayResults(guids: List<String>) =
         MmkvManager.clearAllTestDelayResults(guids)
 
+    override fun clearInvalidServers(groupId: String): Int = MmkvManager.clearInvalidServers(groupId)
+
     override fun prepareServerTest(guids: List<String>, requestId: String, testSpeed: Boolean) =
         MmkvManager.prepareServerTest(guids, requestId, testSpeed)
 

@@ -602,6 +602,7 @@ object AngConfigManager {
      * @param subId The subscription ID.
      */
     fun sortByTestResultsForSub(subId: String) {
+        // 读取当前组的延迟结果，把失败和未测节点放在可用节点之后。
         val serverList = MmkvManager.decodeServerList(subId)
         if (serverList.isEmpty()) return
 
@@ -614,7 +615,8 @@ object AngConfigManager {
             .sortedBy { it.second }
             .map { it.first }
             .toMutableList()
-        MmkvManager.encodeServerList(sorted, subId)
+        // 清理可能发生在读取与写回之间；沿用带索引锁的写入，重新核对剩余 GUID。
+        MmkvManager.reorderServerLists(sorted)
     }
 
     /** 按下载速度排序指定节点；仅更新这些节点在各自订阅分组中的顺序。 */

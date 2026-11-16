@@ -1,11 +1,14 @@
 package com.v2ray.ang
 
+import android.app.UiAutomation
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Rect
 import android.os.SystemClock
+import android.provider.Settings
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.core.content.ContextCompat
@@ -19,6 +22,7 @@ import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.dto.entities.SubscriptionItem
 import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.extension.serializable
+import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.SettingsManager
 import com.v2ray.ang.handler.SpeedtestManager
@@ -29,7 +33,9 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -51,6 +57,12 @@ import java.util.concurrent.TimeUnit
 @RunWith(AndroidJUnit4::class)
 class SpeedtestInstrumentedTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
+    // 手动读屏场景保留已启用的 TalkBack，避免 UiAutomation 默认暂停服务。
+    private val automation = if (InstrumentationRegistry.getArguments().getString("manualTalkback") == "true") {
+        instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+    } else {
+        instrumentation.uiAutomation
+    }
     private val context = instrumentation.targetContext
     private val groupId = "speedtest-${UUID.randomUUID()}"
     private val guids = mutableListOf<String>()
@@ -126,6 +138,153 @@ class SpeedtestInstrumentedTest {
         assertEquals(expectedOrder, MmkvManager.decodeServerList(groupId))
         assertEquals(firstResult.testSpeedBytesPerSecond, MmkvManager.decodeServerAffiliationInfo(first)!!.testSpeedBytesPerSecond)
         assertEquals(second, MmkvManager.getSelectServer())
+    }
+
+    /** 验证触摸清理、持久化和重建后再次测速排序都只使用剩余 GUID。 */
+    @Test
+    fun shouldClearOnlyFailedNodesAndRetestTheRemainingNodesFromTheMainMenu() {
+        // 构造不同状态，只把延迟已确认失败的一个节点作为清理目标。
+        val healthy = addProfile("Cleanup healthy", 18080)
+        val failed = addProfile("Cleanup failed", 1)
+        val downloadFailed = addProfile("Keep download failure", 1)
+        addProfile("Keep untested", 1)
+        val cancelled = addProfile("Keep cancelled", 1)
+        val unsupported = addProfile("Keep unsupported", 1, EConfigType.CUSTOM)
+        storeResult(healthy, 20L, 1_000_000L)
+        storeResult(failed, -1L, -1L)
+        storeResult(downloadFailed, 20L, -1L)
+        MmkvManager.prepareServerTest(listOf(cancelled), "cancelled-fixture", testSpeed = true)
+        storeResult(unsupported, -1L, RealPingResult.SPEED_UNSUPPORTED)
+        MmkvManager.setSelectServer(healthy)
+        val remaining = MmkvManager.decodeServerList(groupId).filter { it != failed }
+        openMain()
+
+        // 通过真实菜单点击立即清理，不调用存储删除接口绕过 ViewModel。
+        touchMenu(R.string.title_clear_invalid_servers)
+        awaitOrder(remaining)
+        awaitNodeAbsent("Cleanup failed")
+        assertNull(MmkvManager.decodeServerConfig(failed))
+        assertEquals(healthy, MmkvManager.getSelectServer())
+        assertEquals(-1L, MmkvManager.decodeServerAffiliationInfo(downloadFailed)!!.testSpeedBytesPerSecond)
+        assertEquals(0L, MmkvManager.decodeServerAffiliationInfo(cancelled)!!.testDelayMillis)
+        assertEquals(RealPingResult.SPEED_UNSUPPORTED, MmkvManager.decodeServerAffiliationInfo(unsupported)!!.testSpeedBytesPerSecond)
+
+        // Activity 重建后从同一持久化列表重测，服务回执必须恰好覆盖剩余节点。
+        scenario!!.recreate()
+        awaitNode("Cleanup healthy")
+        touchMenu(R.string.title_speed_test_all_server)
+        val finish = awaitEvent(AppConfig.MSG_MEASURE_CONFIG_FINISH)
+        val testedGuids = mutableSetOf<String>()
+        for (event in events) {
+            if (event.getIntExtra("key", 0) != AppConfig.MSG_MEASURE_CONFIG_SUCCESS || requestId(event) != requestId(finish)) continue
+            val result = event.serializable<RealPingResult>("content") ?: continue
+            testedGuids.add(result.guid)
+        }
+        assertEquals(remaining.toSet(), testedGuids)
+        assertNull(MmkvManager.decodeServerAffiliationInfo(failed))
+
+        // 排序仍从剩余 GUID 读取速度，不能把已经删除的节点写回组索引。
+        val speeds = linkedMapOf<String, Long>()
+        for (guid in remaining) speeds[guid] = MmkvManager.decodeServerAffiliationInfo(guid)!!.testSpeedBytesPerSecond
+        val expected = SpeedtestManager.sortBySpeed(remaining, speeds)
+        touchMenu(R.string.title_sort_by_speed)
+        awaitOrder(expected)
+    }
+
+    /** 验证手动订阅更新沿用完整响应，清理过的节点可以重新导入。 */
+    @Test
+    fun shouldReimportTheWholeSubscriptionWhenManuallyUpdatingAfterCleanup() {
+        val contents = "socks://127.0.0.1:1#Restored-failed\nsocks://127.0.0.1:18080#Restored-healthy"
+        val subscription = LocalSubscription(contents)
+        try {
+            // 使用本地订阅响应，测试不访问用户订阅 URL，也不依赖远端内容变化。
+            MmkvManager.encodeSubscription(groupId, SubscriptionItem(
+                remarks = "Cleanup subscription fixture", url = subscription.url, allowInsecureUrl = true
+            ))
+            assertEquals(2, AngConfigManager.importBatchConfig(contents, groupId, append = false).first)
+            val original = MmkvManager.decodeServerList(groupId)
+            guids.addAll(original)
+            val failed = original.first { MmkvManager.decodeServerConfig(it)!!.remarks == "Restored-failed" }
+            val healthy = original.first { it != failed }
+            storeResult(failed, -1L, -1L)
+            storeResult(healthy, 20L, 1_000_000L)
+            MmkvManager.setSelectServer(healthy)
+            openMain()
+
+            touchMenu(R.string.title_clear_invalid_servers)
+            awaitOrder(listOf(healthy))
+            awaitNodeAbsent("Restored-failed")
+            touchMenu(R.string.title_sub_update)
+            awaitNode("Restored-failed")
+
+            // 更新产生全新的 GUID，不能受此前本地清理记录限制。
+            val restored = MmkvManager.decodeServerList(groupId)
+            guids.addAll(restored)
+            assertEquals(2, restored.size)
+            assertFalse(restored.contains(failed))
+            assertEquals(setOf("Restored-failed", "Restored-healthy"), restored.map { MmkvManager.decodeServerConfig(it)!!.remarks }.toSet())
+            assertEquals(subscription.url, MmkvManager.decodeSubscription(groupId)!!.url)
+            scenario!!.recreate()
+            awaitNode("Restored-failed")
+            assertEquals(restored, MmkvManager.decodeServerList(groupId))
+        } finally {
+            subscription.close()
+        }
+    }
+
+    /** 验证菜单的键盘 Enter、Space 和 D-pad 中心键与触摸执行相同删除。 */
+    @Test
+    fun shouldActivateInvalidNodeCleanupWithKeyboardAndDpad() {
+        for (keyCode in listOf(KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_DPAD_CENTER)) {
+            // 每种按键使用新的节点和 Activity，避免前一次空列表掩盖操作失败。
+            val failed = addProfile("Keyboard cleanup $keyCode", 1)
+            storeResult(failed, -1L, -1L)
+            openMain()
+            touch(awaitNode(context.getString(R.string.acc_more)))
+            val cleanup = awaitMenuAction(R.string.title_clear_invalid_servers)
+            assertTrue(cleanup.isClickable)
+            assertTrue(cleanup.isFocusable)
+            assertTrue(cleanup.performAction(AccessibilityNodeInfo.ACTION_FOCUS))
+
+            instrumentation.sendKeyDownUpSync(keyCode)
+            awaitOrder(emptyList())
+
+            assertNull(MmkvManager.decodeServerConfig(failed))
+            scenario!!.close()
+            scenario = null
+        }
+    }
+
+    /** 传入 -e manualTalkback true 并启用 TalkBack，以滑动遍历焦点，再用设备双击或读屏快捷键激活。 */
+    @Test
+    fun shouldClearInvalidNodesWithTalkBack() {
+        assumeTrue("此场景需显式传入 manualTalkback=true", InstrumentationRegistry.getArguments().getString("manualTalkback") == "true")
+        val enabledServices = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        assumeTrue("此场景需先启用设备上已安装的 TalkBack", enabledServices?.contains("com.google.android.marvin.talkback") == true)
+
+        // 构造独立失败和可用节点，读屏激活必须只删除已确认失败的节点。
+        val failed = addProfile("TalkBack cleanup failed", 1)
+        val healthy = addProfile("TalkBack cleanup healthy", 1)
+        storeResult(failed, -1L, -1L)
+        storeResult(healthy, 20L, 1_000_000L)
+        openMain()
+        assertTrue(awaitMenuAction(R.string.acc_more).performAction(AccessibilityNodeInfo.ACTION_CLICK))
+
+        // 从上一菜单行开始，等待设备右滑两次再左滑一次；文本子节点不能成为额外焦点。
+        assertTrue(awaitMenuAction(R.string.title_speed_test_all_server).performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS))
+        awaitAccessibilityFocus(R.string.title_speed_test_all_server)
+        awaitAccessibilityFocus(R.string.title_clear_invalid_servers, timeoutMillis = 20_000L)
+        awaitAccessibilityFocus(R.string.title_sub_update, timeoutMillis = 20_000L)
+        awaitAccessibilityFocus(R.string.title_clear_invalid_servers, timeoutMillis = 20_000L)
+
+        // 等待设备双击或读屏快捷键由 TalkBack 派发；测试注入的 MotionEvent 会绕过读屏输入过滤。
+        awaitOrder(listOf(healthy), timeoutMillis = 20_000L)
+        awaitNodeAbsent("TalkBack cleanup failed")
+        assertNull(MmkvManager.decodeServerConfig(failed))
+        assertTrue(MmkvManager.decodeServerConfig(healthy) != null)
+        scenario!!.recreate()
+        awaitNode("TalkBack cleanup healthy")
+        assertEquals(listOf(healthy), MmkvManager.decodeServerList(groupId))
     }
 
     @Test
@@ -237,6 +396,12 @@ class SpeedtestInstrumentedTest {
         return guid
     }
 
+    private fun storeResult(guid: String, delay: Long, speed: Long) {
+        // 通过真实测速记录写入接口准备状态，保留请求 ID 和旧结果的清空规则。
+        MmkvManager.prepareServerTest(listOf(guid), "cleanup-fixture", testSpeed = true)
+        assertTrue(MmkvManager.encodeServerTestResult(RealPingResult(guid, delay, speed), "cleanup-fixture"))
+    }
+
     private fun openMain() {
         scenario = ActivityScenario.launch(MainActivity::class.java)
         awaitNode(context.getString(R.string.acc_more))
@@ -263,8 +428,8 @@ class SpeedtestInstrumentedTest {
         throw AssertionError("未收到服务回执：key=$key requestId=$id")
     }
 
-    private fun awaitOrder(expected: List<String>) {
-        val deadline = SystemClock.elapsedRealtime() + 5_000L
+    private fun awaitOrder(expected: List<String>, timeoutMillis: Long = 5_000L) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
         while (SystemClock.elapsedRealtime() < deadline) {
             if (MmkvManager.decodeServerList(groupId) == expected) return
             SystemClock.sleep(25)
@@ -275,12 +440,47 @@ class SpeedtestInstrumentedTest {
     private fun awaitNode(label: String): AccessibilityNodeInfo {
         val deadline = SystemClock.elapsedRealtime() + 8_000L
         while (SystemClock.elapsedRealtime() < deadline) {
-            val root = instrumentation.uiAutomation.rootInActiveWindow
+            val root = automation.rootInActiveWindow
             val node = findNode(root, label)
             if (node != null) return node
             SystemClock.sleep(50)
         }
         throw AssertionError("界面缺少可访问节点：$label")
+    }
+
+    private fun awaitNodeAbsent(label: String) {
+        // 等待 ViewModel 刷新最终列表，不能仅凭存储删除完成就启动下一次 UI 操作。
+        val deadline = SystemClock.elapsedRealtime() + 8_000L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val root = automation.rootInActiveWindow
+            if (root != null && findNode(root, label) == null) return
+            SystemClock.sleep(50)
+        }
+        throw AssertionError("清理后仍显示节点：$label")
+    }
+
+    private fun awaitMenuAction(labelRes: Int): AccessibilityNodeInfo {
+        // UiAutomation 包含不可操作的文本子节点，焦点和激活应落在承载同一标签的菜单行。
+        var action = awaitNode(context.getString(labelRes))
+        while (!action.isClickable) {
+            action = action.parent ?: throw AssertionError("菜单缺少可操作的父节点：${context.getString(labelRes)}")
+        }
+        return action
+    }
+
+    private fun awaitAccessibilityFocus(labelRes: Int, timeoutMillis: Long = 5_000L): AccessibilityNodeInfo {
+        // 等 TalkBack 更新最终焦点后才发出下一手势，避免读屏服务的异步回执串行错位。
+        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val action = awaitMenuAction(labelRes)
+            if (action.isAccessibilityFocused) {
+                println("TalkBack focus: ${context.getString(labelRes)}, enabled=${action.isEnabled}, clickable=${action.isClickable}")
+                SystemClock.sleep(800L)
+                return action
+            }
+            SystemClock.sleep(50L)
+        }
+        throw AssertionError("TalkBack 焦点未到达菜单：${context.getString(labelRes)}")
     }
 
     private fun findNode(root: AccessibilityNodeInfo?, label: String): AccessibilityNodeInfo? {
@@ -327,6 +527,49 @@ class SpeedtestInstrumentedTest {
         } finally {
             client.connectionPool.evictAll()
             client.dispatcher.executorService.shutdown()
+        }
+    }
+
+    /** 本用例拥有单次订阅响应和后台线程，结束时由 close 释放，不使用用户网络数据。 */
+    private class LocalSubscription(private val content: String) : AutoCloseable {
+        private val listener = ServerSocket(0, 1, InetAddress.getByName(AppConfig.LOOPBACK))
+        private val executor = Executors.newSingleThreadExecutor()
+        // close 从测试线程读取后台线程保存的连接，Volatile 保证能看见最新引用。
+        @Volatile private var connection: Socket? = null
+        val url = "http://127.0.0.1:${listener.localPort}/subscription"
+        private val task = executor.submit(::serveSubscription)
+
+        private fun serveSubscription() {
+            try {
+                val socket = listener.accept()
+                connection = socket
+                try {
+                    // 读完请求头再发送完整订阅文本，避免测试成功依赖非标准 HTTP 行为。
+                    socket.soTimeout = 5_000
+                    val input = socket.getInputStream().bufferedReader()
+                    var line = input.readLine()
+                    while (!line.isNullOrEmpty()) line = input.readLine()
+                    val body = content.toByteArray(Charsets.UTF_8)
+                    val headers = "HTTP/1.1 200 OK\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
+                    val output = socket.getOutputStream()
+                    output.write(headers.toByteArray(Charsets.UTF_8))
+                    output.write(body)
+                    output.flush()
+                } finally {
+                    socket.close()
+                }
+            } catch (error: SocketException) {
+                if (!listener.isClosed) throw error
+            }
+        }
+
+        override fun close() {
+            // 取消尚未到来的请求和等待线程，测试用网络资源不会留到下一个用例。
+            listener.close()
+            connection?.close()
+            task.cancel(true)
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS))
         }
     }
 

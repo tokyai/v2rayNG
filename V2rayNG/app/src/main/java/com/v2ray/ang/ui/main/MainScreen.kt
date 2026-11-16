@@ -190,6 +190,7 @@ fun MainScreen(
                             MainMoreMenuAction.TestAll -> onAction(MainAction.TestAllServers)
                             MainMoreMenuAction.TestAllRealPing -> onAction(MainAction.TestRealAllServers)
                             MainMoreMenuAction.TestAllSpeed -> onAction(MainAction.TestSpeedAllServers)
+                            MainMoreMenuAction.ClearInvalid -> onAction(MainAction.ClearInvalidServers)
                             MainMoreMenuAction.UpdateSubscriptions -> onAction(MainAction.UpdateSubscriptions)
                         }
                     }

@@ -584,6 +584,7 @@
     <string name="sub_info_unlimited">غير محدود</string>
 
     <string name="title_speed_test_all_server">اختبار زمن الاستجابة وسرعة التنزيل</string>
+    <string name="title_clear_invalid_servers">حذف العقد غير الصالحة</string>
     <string name="title_sort_by_speed">ترتيب حسب السرعة (الأسرع أولاً)</string>
     <string name="server_test_speed_value">%1$.1f MB/s</string>
     <string name="server_test_speed_failed">فشل اختبار السرعة</string>

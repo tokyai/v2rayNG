@@ -576,6 +576,7 @@
     <string name="sub_info_unlimited">بی‌حد</string>
 
     <string name="title_speed_test_all_server">آزمایش تئخیر وو سرعت دانلود</string>
+    <string name="title_clear_invalid_servers">پاک کردن گره‌یا ناموئتبر</string>
     <string name="title_sort_by_speed">ترتیب و ری سرعت (توندتر اول)</string>
     <string name="server_test_speed_value">%1$.1f MB/s</string>
     <string name="server_test_speed_failed">آزمایش سرعت سر نگرت</string>

@@ -5,6 +5,15 @@ import org.junit.jupiter.api.Test
 
 class MainImportMenuTest {
 
+    /** 验证一键清理紧跟组合测速，避免入口被放到其他菜单。 */
+    @Test
+    fun shouldDisplayInvalidNodeCleanupImmediatelyAfterCombinedSpeedtest() {
+        val actions = MainMoreMenuAction.entries
+        val speedtestPosition = actions.indexOf(MainMoreMenuAction.TestAllSpeed)
+
+        assertEquals(MainMoreMenuAction.ClearInvalid, actions[speedtestPosition + 1])
+    }
+
     @Test
     fun regularShareMenuContainsOnlyShareActions() {
         val expected = listOf(

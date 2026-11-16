@@ -577,6 +577,7 @@
     <string name="sub_info_unlimited">Unlimited</string>
 
     <string name="title_speed_test_all_server">Test latency and download speed</string>
+    <string name="title_clear_invalid_servers">Clear unavailable nodes</string>
     <string name="title_sort_by_speed">Sort by speed (fastest first)</string>
     <string name="server_test_speed_value">%1$.1f MB/s</string>
     <string name="server_test_speed_failed">Speed test failed</string>

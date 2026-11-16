@@ -7,10 +7,33 @@ import com.v2ray.ang.dto.entities.ServersCache
 import com.v2ray.ang.enums.EConfigType
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class MainSpeedtestTest {
+
+    /** 空组表示“全部”，禁止将当前组清理扩大到所有订阅。 */
+    @Test
+    fun shouldRejectCleanupFromAllGroupsOrWhileTestingOrAlreadyClearing() {
+        val allGroups = MainUiState()
+        val selectedGroup = MainUiState(selectedGroupId = "subscription")
+
+        assertNull(invalidServerCleanupGroup(allGroups, isClearing = false))
+        assertNull(invalidServerCleanupGroup(selectedGroup.copy(isTesting = true), isClearing = false))
+        assertNull(invalidServerCleanupGroup(selectedGroup, isClearing = true))
+    }
+
+    /** 清理使用组 ID 快照，切换分组不改变已经发起的删除目标。 */
+    @Test
+    fun shouldCaptureTheSelectedSubscriptionForCleanup() {
+        val state = MainUiState(selectedGroupId = "original-group")
+        val cleanupGroup = invalidServerCleanupGroup(state, isClearing = false)
+        val changedState = state.copy(selectedGroupId = "another-group")
+
+        assertEquals("original-group", cleanupGroup)
+        assertEquals("another-group", invalidServerCleanupGroup(changedState, isClearing = false))
+    }
 
     @Test
     fun shouldStartWithoutSpeedResultsAndKeepExistingDelayRequestsCompatible() {

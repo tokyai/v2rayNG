@@ -39,6 +39,13 @@ interface MainDataSource : Closeable {
     fun removeInvalidServerByGuid(guid: String): Int
     fun removeInvalidServersInGroup(groupId: String): Int
 
+    /**
+     * 清除一个订阅组中已确认延迟失败的节点，保留未测及不支持测速的节点。
+     * @param groupId 要清理的订阅组 ID，不能为空或表示“全部”。
+     * @return 本次实际删除的节点数。
+     */
+    fun clearInvalidServers(groupId: String): Int
+
     fun clearAllTestDelayResults(guids: List<String>)
     fun prepareServerTest(guids: List<String>, requestId: String, testSpeed: Boolean)
     suspend fun sortBySpeed(guids: List<String>)

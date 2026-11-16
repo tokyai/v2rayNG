@@ -577,6 +577,7 @@
     <string name="sub_info_unlimited">Limitsiz</string>
 
     <string name="title_speed_test_all_server">Gecikməni və yükləmə sürətini yoxla</string>
+    <string name="title_clear_invalid_servers">İşləməyən qovşaqları sil</string>
     <string name="title_sort_by_speed">Sürətə görə sırala (əvvəl ən sürətli)</string>
     <string name="server_test_speed_value">%1$.1f MB/s</string>
     <string name="server_test_speed_failed">Sürət testi uğursuz oldu</string>

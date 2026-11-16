@@ -580,6 +580,7 @@
     <string name="sub_info_unlimited">Без ограничений</string>
 
     <string name="title_speed_test_all_server">Проверить задержку и скорость загрузки</string>
+    <string name="title_clear_invalid_servers">Удалить неработающие узлы</string>
     <string name="title_sort_by_speed">Сортировать по скорости (сначала быстрые)</string>
     <string name="server_test_speed_value">%1$.1f МБ/с</string>
     <string name="server_test_speed_failed">Ошибка проверки скорости</string>

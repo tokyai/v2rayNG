@@ -574,6 +574,7 @@
     <string name="sub_info_unlimited">无限制</string>
 
     <string name="title_speed_test_all_server">一键测试延迟和速度</string>
+    <string name="title_clear_invalid_servers">一键清除失效节点</string>
     <string name="title_sort_by_speed">按速度排序（从快到慢）</string>
     <string name="server_test_speed_value">%1$.1f MB/s</string>
     <string name="server_test_speed_failed">测速失败</string>

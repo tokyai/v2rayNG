@@ -74,6 +74,12 @@ internal fun applyTestResultsToRows(
     return result
 }
 
+/** 固定本次清理的订阅组；全部视图、测试中和重复清理均不能启动删除。 */
+internal fun invalidServerCleanupGroup(state: MainUiState, isClearing: Boolean): String? {
+    if (state.selectedGroupId.isBlank() || state.isTesting || isClearing) return null
+    return state.selectedGroupId
+}
+
 class MainViewModel(
     application: Application,
     private val dataSource: MainDataSource
@@ -111,6 +117,7 @@ class MainViewModel(
     private var preloadJob: Job? = null
     private var selectedGroupLoadJob: Job? = null
     private var reloadJob: Job? = null
+    private var clearInvalidServersJob: Job? = null
     private var testResultFlushJob: Job? = null
     private val pendingTestResults = linkedMapOf<String, RealPingResult>()
 
@@ -314,6 +321,7 @@ class MainViewModel(
             MainAction.RemoveAllServers -> removeAllServerAsync()
             MainAction.RemoveDuplicateServers -> removeDuplicateServerAsync()
             MainAction.RemoveInvalidServers -> removeInvalidServerAsync()
+            MainAction.ClearInvalidServers -> clearInvalidServersAsync()
             MainAction.SortByTestResults -> sortByTestResultsAsync()
             MainAction.SortBySpeed -> sortBySpeedAsync()
             MainAction.UpdateSubscriptions -> importConfigViaSub(uiState.value.selectedGroupId)
@@ -725,6 +733,36 @@ class MainViewModel(
         }
     }
 
+    private fun clearInvalidServersAsync() {
+        // 在主线程固定组 ID，清理期间切换页面也不会删除另一组的节点。
+        val groupId = invalidServerCleanupGroup(uiState.value, clearInvalidServersJob?.isActive == true)
+        if (groupId == null) {
+            toast(R.string.toast_action_not_allowed)
+            return
+        }
+        clearInvalidServersJob = viewModelScope.launch { clearInvalidServersAndReload(groupId) }
+    }
+
+    private suspend fun clearInvalidServersAndReload(groupId: String) {
+        _isLoading.value = true
+        try {
+            // 等该组整条排序写入队列完成；只取消最后一个任务会遗留更早的旧顺序写入。
+            serverOrderPersistenceJobs.remove(groupId)?.join()
+            val count = withContext(ioDispatcher) { dataSource.clearInvalidServers(groupId) }
+
+            // 清理完成后重新读取持久化列表；等待界面刷新后才允许下一轮测速。
+            setupGroupTab(forceRefresh = true).join()
+            toast(dataSource.getString(R.string.title_del_config_count, count))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            LogUtil.e(AppConfig.TAG, "Clear invalid servers failed: component=MainViewModel groupId=$groupId", error)
+            toastError(R.string.toast_failure)
+        } finally {
+            _isLoading.value = false
+        }
+    }
+
     private fun sortByTestResultsAsync() {
         launchLoading {
             withContext(ioDispatcher) {
@@ -752,6 +790,7 @@ class MainViewModel(
     }
 
     private fun sortBySpeedAsync() {
+        if (clearInvalidServersJob?.isActive == true) return
         // 在启动时固定参与节点，切换分组或修改搜索不会把排序应用到其他节点。
         val guids = currentServers().map { it.guid }
         if (guids.isEmpty()) return
@@ -851,6 +890,7 @@ class MainViewModel(
     }
 
     fun moveServer(groupId: String, fromPosition: Int, toPosition: Int) {
+        if (clearInvalidServersJob?.isActive == true) return
         val groupState = mutableServerGroupState(groupId).value
         val servers = groupState.servers.toMutableList()
         if (!servers.moveItem(fromPosition, toPosition)) return
@@ -890,6 +930,7 @@ class MainViewModel(
 
     /** 对当前分组及搜索结果启动批量测试，重复操作会先取消上一批。 */
     fun testAllRealPing(onlyTcp: Boolean = false, testSpeed: Boolean = false) {
+        if (clearInvalidServersJob?.isActive == true) return
         cancelAllPing()
         val groupId = uiState.value.selectedGroupId
         val servers = currentServers()

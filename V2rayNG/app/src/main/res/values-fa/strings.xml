@@ -576,6 +576,7 @@
     <string name="sub_info_unlimited">نامحدود</string>
 
     <string name="title_speed_test_all_server">آزمایش تأخیر و سرعت دانلود</string>
+    <string name="title_clear_invalid_servers">پاک کردن گره‌های نامعتبر</string>
     <string name="title_sort_by_speed">مرتب‌سازی بر اساس سرعت (سریع‌ترین در ابتدا)</string>
     <string name="server_test_speed_value">%1$.1f MB/s</string>
     <string name="server_test_speed_failed">آزمایش سرعت ناموفق بود</string>
